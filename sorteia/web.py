@@ -328,11 +328,11 @@ h1 span{background:linear-gradient(90deg,var(--verde),#7df0b4);-webkit-backgroun
 }
 .titulo{color:var(--suave);font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:1.4px;margin:4px 0 10px}
 
-.grade-jogos{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
-@media(max-width:520px){.grade-jogos{grid-template-columns:repeat(3,1fr)}}
+.grade-jogos{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
 .chip-jogo{
   border:1px solid var(--borda);background:#0f1730;color:var(--texto);border-radius:14px;
-  padding:10px 6px;cursor:pointer;text-align:center;transition:all .15s;font-size:.82rem;line-height:1.35
+  padding:10px 6px;cursor:pointer;text-align:center;transition:all .15s;font-size:.82rem;line-height:1.35;
+  min-width:0;overflow-wrap:break-word
 }
 .chip-jogo em{display:block;font-style:normal;font-size:1.35rem;margin-bottom:2px}
 .chip-jogo small{display:block;color:var(--suave);font-size:.62rem;margin-top:1px}
@@ -351,7 +351,7 @@ h1 span{background:linear-gradient(90deg,var(--verde),#7df0b4);-webkit-backgroun
 .stepper span{min-width:56px;text-align:center;font-weight:800;font-size:1.1rem}
 .stepper small{display:block;color:var(--suave);font-weight:400;font-size:.6rem;text-transform:uppercase;letter-spacing:1px}
 .gerar{
-  flex:1;min-width:200px;height:52px;border:0;border-radius:16px;cursor:pointer;
+  flex:1 1 160px;min-width:0;height:52px;border:0;border-radius:16px;cursor:pointer;
   background:linear-gradient(135deg,var(--verde),var(--verde2));color:#04120a;
   font-weight:800;font-size:1.08rem;box-shadow:0 10px 26px rgba(46,227,131,.3);transition:transform .12s
 }
