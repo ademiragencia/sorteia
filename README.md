@@ -79,6 +79,23 @@ na pasta `dados/`, atualizados de forma incremental:
 1. **API comunitária** ([loteriascaixa-api](https://loteriascaixa-api.herokuapp.com)) — histórico completo em uma requisição;
 2. **API oficial do Portal de Loterias da Caixa** — usada como fallback, concurso a concurso.
 
+## 🌐 Versão web (Vercel)
+
+O SorteIA também roda como site — interface em `sorteia/web.py`, servida
+pelo entrypoint `app.py` (WSGI puro, sem frameworks):
+
+```bash
+python3 app.py   # abre em http://localhost:8000
+```
+
+No [Vercel](https://vercel.com), basta importar o repositório: o
+`app.py` é detectado automaticamente como entrypoint Python. Endpoints:
+
+- `GET /` — interface web
+- `GET /api/jogos` — jogos e estratégias disponíveis
+- `GET /api/palpite?jogo=megasena&n=3&estrategia=inteligente` — palpites em JSON
+- `GET /api/analise?jogo=megasena` — estatísticas do histórico
+
 ## 🧪 Testes
 
 ```bash

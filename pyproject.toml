@@ -17,3 +17,6 @@ sorteia = "sorteia.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["sorteia*"]
+
+[tool.vercel]
+entrypoint = "app.py"
