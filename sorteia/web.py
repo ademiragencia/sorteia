@@ -1,12 +1,15 @@
-"""Interface web do SorteIA — aplicativo WSGI em Python puro.
+"""Interface web do SorteIA — aplicativo WSGI em Python puro (PWA instalável).
 
 Roda em qualquer servidor WSGI e no Vercel (entrypoint ``app.py``).
 
 Rotas:
-    GET /                → página web do SorteIA
-    GET /api/jogos       → lista de jogos suportados
-    GET /api/palpite     → ?jogo=megasena&n=3&estrategia=inteligente[&demo=1]
-    GET /api/analise     → ?jogo=megasena[&demo=1]
+    GET /                     → página web do SorteIA
+    GET /api/jogos            → lista de jogos suportados
+    GET /api/palpite          → ?jogo=megasena&n=3&estrategia=inteligente[&demo=1]
+    GET /api/analise          → ?jogo=megasena[&demo=1]
+    GET /manifest.webmanifest → manifesto do PWA
+    GET /sw.js                → service worker
+    GET /icone-{180,192,512}.png → ícones gerados em tempo de execução
 """
 
 from __future__ import annotations
@@ -20,7 +23,7 @@ from concurrent.futures import ThreadPoolExecutor
 # Em servidores serverless (Vercel) só /tmp é gravável.
 os.environ.setdefault("SORTEIA_DADOS", "/tmp/sorteia-dados")
 
-from . import __version__
+from . import __version__, icone
 from .analise import analisar
 from .demo import gerar_historico
 from .fontes import (
@@ -85,14 +88,20 @@ def _historico(jogo, usar_demo: bool) -> list[dict]:
     return concursos
 
 
-def _json_resposta(start_response, corpo: dict, status: str = "200 OK"):
-    dados = json.dumps(corpo, ensure_ascii=False).encode("utf-8")
+def _resposta(start_response, dados: bytes, tipo: str, status: str = "200 OK",
+              cache: str = "no-store"):
     start_response(status, [
-        ("Content-Type", "application/json; charset=utf-8"),
+        ("Content-Type", tipo),
         ("Content-Length", str(len(dados))),
-        ("Cache-Control", "no-store"),
+        ("Cache-Control", cache),
     ])
     return [dados]
+
+
+def _json_resposta(start_response, corpo: dict, status: str = "200 OK"):
+    dados = json.dumps(corpo, ensure_ascii=False).encode("utf-8")
+    return _resposta(start_response, dados,
+                     "application/json; charset=utf-8", status)
 
 
 def _api_jogos() -> dict:
@@ -174,18 +183,27 @@ def app(environ, start_response):
     parametros = urllib.parse.parse_qs(environ.get("QUERY_STRING", ""))
     try:
         if caminho == "/":
-            dados = PAGINA.encode("utf-8")
-            start_response("200 OK", [
-                ("Content-Type", "text/html; charset=utf-8"),
-                ("Content-Length", str(len(dados))),
-            ])
-            return [dados]
+            return _resposta(start_response, PAGINA.encode("utf-8"),
+                             "text/html; charset=utf-8",
+                             cache="public, max-age=0, must-revalidate")
         if caminho == "/api/jogos":
             return _json_resposta(start_response, _api_jogos())
         if caminho == "/api/palpite":
             return _json_resposta(start_response, _api_palpite(parametros))
         if caminho == "/api/analise":
             return _json_resposta(start_response, _api_analise(parametros))
+        if caminho == "/manifest.webmanifest":
+            return _resposta(start_response, MANIFESTO.encode("utf-8"),
+                             "application/manifest+json; charset=utf-8",
+                             cache="public, max-age=3600")
+        if caminho == "/sw.js":
+            return _resposta(start_response, SERVICE_WORKER.encode("utf-8"),
+                             "application/javascript; charset=utf-8",
+                             cache="public, max-age=0, must-revalidate")
+        if caminho in ("/icone-180.png", "/icone-192.png", "/icone-512.png"):
+            tamanho = int(caminho.split("-")[1].split(".")[0])
+            return _resposta(start_response, icone.gerar(tamanho), "image/png",
+                             cache="public, max-age=86400")
         return _json_resposta(start_response, {"erro": "rota não encontrada"},
                               "404 Not Found")
     except (KeyError, ValueError) as erro:
@@ -199,46 +217,169 @@ def app(environ, start_response):
         )
 
 
+MANIFESTO = json.dumps({
+    "name": "SorteIA — Palpites das Loterias Caixa",
+    "short_name": "SorteIA",
+    "description": "Palpites inteligentes com base no histórico completo das Loterias Caixa.",
+    "lang": "pt-BR",
+    "start_url": "/",
+    "scope": "/",
+    "display": "standalone",
+    "orientation": "portrait",
+    "background_color": "#0b1020",
+    "theme_color": "#0b1020",
+    "icons": [
+        {"src": "/icone-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+        {"src": "/icone-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+        {"src": "/icone-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
+    ],
+}, ensure_ascii=False)
+
+
+SERVICE_WORKER = """const CACHE = "sorteia-v2";
+const SHELL = ["/", "/manifest.webmanifest", "/icone-192.png", "/icone-512.png"];
+
+self.addEventListener("install", (e) => {
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)));
+  self.skipWaiting();
+});
+
+self.addEventListener("activate", (e) => {
+  e.waitUntil(
+    caches.keys().then((ks) =>
+      Promise.all(ks.filter((k) => k !== CACHE).map((k) => caches.delete(k)))
+    )
+  );
+  self.clients.claim();
+});
+
+self.addEventListener("fetch", (e) => {
+  const url = new URL(e.request.url);
+  if (e.request.method !== "GET" || url.pathname.startsWith("/api/")) return;
+  e.respondWith(
+    fetch(e.request)
+      .then((r) => {
+        const copia = r.clone();
+        caches.open(CACHE).then((c) => c.put(e.request, copia));
+        return r;
+      })
+      .catch(() => caches.match(e.request))
+  );
+});
+"""
+
+
 PAGINA = """<!doctype html>
 <html lang="pt-BR">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>SorteIA 🍀 — palpites inteligentes das Loterias Caixa</title>
-<meta name="description" content="SorteIA analisa o histórico completo das Loterias Caixa e gera palpites estatísticos para Mega-Sena, Lotofácil, Quina e mais.">
+<meta name="description" content="Palpites inteligentes para Mega-Sena, Lotofácil, Quina e todos os jogos da Caixa, com base no histórico completo dos sorteios.">
+<meta name="theme-color" content="#0b1020">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="192x192" href="/icone-192.png">
+<link rel="apple-touch-icon" href="/icone-180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="SorteIA">
 <style>
-:root{--fundo:#0e1420;--carta:#171f2f;--borda:#26324a;--texto:#e8edf6;--suave:#9aa7bd;--verde:#28c76f;--verde2:#1f9d57;--ouro:#f5c542}
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:linear-gradient(160deg,#0e1420 0%,#101a2e 100%);color:var(--texto);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;min-height:100vh}
-.container{max-width:880px;margin:0 auto;padding:32px 20px 64px}
-header{text-align:center;margin-bottom:28px}
-h1{font-size:2.4rem;letter-spacing:.5px}
-h1 span{color:var(--verde)}
-.sub{color:var(--suave);margin-top:6px}
-.painel{background:var(--carta);border:1px solid var(--borda);border-radius:16px;padding:20px;margin-bottom:20px}
-label{display:block;color:var(--suave);font-size:.85rem;margin:12px 0 6px}
-select,input[type=number]{width:100%;background:#0f1626;color:var(--texto);border:1px solid var(--borda);border-radius:10px;padding:10px 12px;font-size:1rem}
-.linha{display:grid;grid-template-columns:2fr 2fr 1fr;gap:14px}
-@media(max-width:640px){.linha{grid-template-columns:1fr}}
-button{width:100%;margin-top:18px;background:linear-gradient(135deg,var(--verde),var(--verde2));color:#06130b;font-weight:700;font-size:1.1rem;border:0;border-radius:12px;padding:14px;cursor:pointer;transition:transform .1s}
-button:hover{transform:translateY(-1px)}
-button:disabled{opacity:.55;cursor:wait}
-.demo{display:flex;align-items:center;gap:8px;margin-top:14px;color:var(--suave);font-size:.85rem}
-.demo input{width:auto}
-.jogo-cabecalho{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:6px;margin-bottom:12px}
-.jogo-cabecalho small{color:var(--suave)}
-.palpite{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:12px;border-bottom:1px dashed var(--borda)}
-.palpite:last-child{border-bottom:0}
-.rotulo{color:var(--suave);font-size:.8rem;min-width:64px}
-.bola{width:42px;height:42px;border-radius:50%;background:radial-gradient(circle at 30% 28%,#ffffff22,#0000),linear-gradient(160deg,var(--verde),var(--verde2));display:flex;align-items:center;justify-content:center;font-weight:800;font-size:1.02rem;color:#04120a;box-shadow:0 3px 8px #0006}
-.bola.trevo{background:linear-gradient(160deg,var(--ouro),#c99b16)}
-.extra{color:var(--ouro);font-size:.9rem;margin-left:4px}
-.afinidade{margin-left:auto;color:var(--suave);font-size:.78rem}
-.erro{background:#3a1d24;border:1px solid #7c3242;color:#ffb9c5;border-radius:12px;padding:14px;margin-top:16px}
-.aviso{color:var(--suave);font-size:.82rem;line-height:1.5;text-align:center;margin-top:26px}
-.ultimo{color:var(--suave);font-size:.85rem;margin-top:10px}
-footer{text-align:center;color:var(--suave);font-size:.8rem;margin-top:34px}
-footer a{color:var(--verde)}
+:root{
+  --fundo:#0b1020;--carta:#141c31;--carta2:#1a2440;--borda:#273455;
+  --texto:#eef2fb;--suave:#95a3c2;--verde:#2ee383;--verde2:#14a659;
+  --ouro:#ffcf4d;--sombra:0 18px 44px rgba(0,0,0,.45)
+}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html{scroll-behavior:smooth}
+body{
+  color:var(--texto);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  min-height:100vh;background:var(--fundo);overflow-x:hidden;
+  padding-bottom:env(safe-area-inset-bottom)
+}
+body::before,body::after{
+  content:"";position:fixed;z-index:-1;border-radius:50%;filter:blur(90px);opacity:.35;pointer-events:none
+}
+body::before{width:52vmax;height:52vmax;top:-22vmax;left:-14vmax;background:radial-gradient(circle,#1a7f4e,transparent 65%)}
+body::after{width:46vmax;height:46vmax;bottom:-20vmax;right:-12vmax;background:radial-gradient(circle,#173a7a,transparent 65%)}
+.container{max-width:760px;margin:0 auto;padding:28px 16px 56px}
+
+header{text-align:center;margin-bottom:22px}
+.logo{
+  width:76px;height:76px;margin:0 auto 12px;border-radius:24px;
+  background:linear-gradient(160deg,var(--verde),var(--verde2));
+  display:flex;align-items:center;justify-content:center;font-size:2.4rem;
+  box-shadow:0 10px 28px rgba(46,227,131,.35);animation:flutuar 4s ease-in-out infinite
+}
+@keyframes flutuar{50%{transform:translateY(-6px)}}
+h1{font-size:2.5rem;letter-spacing:.5px;font-weight:800}
+h1 span{background:linear-gradient(90deg,var(--verde),#7df0b4);-webkit-background-clip:text;background-clip:text;color:transparent}
+.sub{color:var(--suave);margin-top:6px;font-size:.98rem}
+
+.instalar{
+  display:none;margin:14px auto 0;padding:10px 22px;border-radius:999px;border:1px solid var(--verde);
+  background:rgba(46,227,131,.12);color:var(--verde);font-weight:700;font-size:.92rem;cursor:pointer
+}
+.instalar.visivel{display:block;animation:pulsar 2.4s ease-in-out infinite}
+@keyframes pulsar{50%{box-shadow:0 0 0 10px rgba(46,227,131,0)}0%{box-shadow:0 0 0 0 rgba(46,227,131,.35)}}
+
+.painel{
+  background:linear-gradient(175deg,var(--carta),var(--carta2));
+  border:1px solid var(--borda);border-radius:22px;padding:20px;margin-bottom:18px;box-shadow:var(--sombra)
+}
+.titulo{color:var(--suave);font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:1.4px;margin:4px 0 10px}
+
+.grade-jogos{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+@media(max-width:520px){.grade-jogos{grid-template-columns:repeat(3,1fr)}}
+.chip-jogo{
+  border:1px solid var(--borda);background:#0f1730;color:var(--texto);border-radius:14px;
+  padding:10px 6px;cursor:pointer;text-align:center;transition:all .15s;font-size:.82rem;line-height:1.35
+}
+.chip-jogo em{display:block;font-style:normal;font-size:1.35rem;margin-bottom:2px}
+.chip-jogo small{display:block;color:var(--suave);font-size:.62rem;margin-top:1px}
+.chip-jogo.ativo{border-color:var(--verde);background:rgba(46,227,131,.13);box-shadow:0 0 0 1px var(--verde),0 6px 18px rgba(46,227,131,.18);transform:translateY(-1px)}
+
+.pilulas{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:4px}
+.pilula{
+  border:1px solid var(--borda);background:#0f1730;color:var(--suave);border-radius:999px;
+  padding:8px 14px;font-size:.82rem;cursor:pointer;transition:all .15s;font-weight:600
+}
+.pilula.ativo{border-color:var(--verde);color:var(--verde);background:rgba(46,227,131,.12)}
+
+.rodape-controles{display:flex;align-items:center;gap:12px;margin-top:16px;flex-wrap:wrap}
+.stepper{display:flex;align-items:center;gap:0;border:1px solid var(--borda);border-radius:14px;overflow:hidden;background:#0f1730}
+.stepper button{width:44px;height:48px;border:0;background:transparent;color:var(--verde);font-size:1.4rem;font-weight:800;cursor:pointer}
+.stepper span{min-width:56px;text-align:center;font-weight:800;font-size:1.1rem}
+.stepper small{display:block;color:var(--suave);font-weight:400;font-size:.6rem;text-transform:uppercase;letter-spacing:1px}
+.gerar{
+  flex:1;min-width:200px;height:52px;border:0;border-radius:16px;cursor:pointer;
+  background:linear-gradient(135deg,var(--verde),var(--verde2));color:#04120a;
+  font-weight:800;font-size:1.08rem;box-shadow:0 10px 26px rgba(46,227,131,.3);transition:transform .12s
+}
+.gerar:active{transform:scale(.98)}
+.gerar:disabled{opacity:.6;cursor:wait}
+.demo{display:flex;align-items:center;gap:8px;margin-top:14px;color:var(--suave);font-size:.8rem}
+.demo input{accent-color:var(--verde);width:16px;height:16px}
+
+.cabecalho-resultado{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:6px;margin-bottom:10px}
+.cabecalho-resultado small{color:var(--suave)}
+.palpite{display:flex;flex-wrap:wrap;align-items:center;gap:7px;padding:12px 4px;border-bottom:1px dashed var(--borda)}
+.palpite:last-of-type{border-bottom:0}
+.rotulo{color:var(--suave);font-size:.72rem;min-width:52px;font-weight:700;text-transform:uppercase;letter-spacing:1px}
+.bola{
+  width:44px;height:44px;border-radius:50%;
+  background:radial-gradient(circle at 30% 26%,rgba(255,255,255,.35),transparent 42%),linear-gradient(160deg,var(--verde),var(--verde2));
+  display:flex;align-items:center;justify-content:center;font-weight:800;font-size:1.04rem;color:#04120a;
+  box-shadow:0 5px 12px rgba(0,0,0,.45);animation:pop .38s cubic-bezier(.34,1.56,.64,1) backwards
+}
+@keyframes pop{from{transform:scale(.2) rotate(-18deg);opacity:0}}
+.bola.trevo{background:radial-gradient(circle at 30% 26%,rgba(255,255,255,.4),transparent 42%),linear-gradient(160deg,var(--ouro),#d19a12)}
+.extra{color:var(--ouro);font-size:.88rem;font-weight:700}
+.afinidade{margin-left:auto;color:var(--suave);font-size:.72rem}
+.ultimo{color:var(--suave);font-size:.82rem;margin-top:12px;line-height:1.5}
+.erro{background:#381d27;border:1px solid #7c3242;color:#ffb9c5;border-radius:16px;padding:14px;margin-top:4px;font-size:.92rem;line-height:1.5}
+
+.aviso{color:var(--suave);font-size:.78rem;line-height:1.6;text-align:center;margin-top:24px;padding:0 10px}
+footer{text-align:center;color:#5f6d8c;font-size:.75rem;margin-top:26px}
 .girando{display:inline-block;animation:girar 1s linear infinite}
 @keyframes girar{to{transform:rotate(360deg)}}
 </style>
@@ -246,30 +387,29 @@ footer a{color:var(--verde)}
 <body>
 <div class="container">
   <header>
-    <h1>🍀 Sorte<span>IA</span></h1>
+    <div class="logo">🍀</div>
+    <h1>Sorte<span>IA</span></h1>
     <p class="sub">Palpites inteligentes com base no histórico completo das Loterias Caixa</p>
+    <button id="instalar" class="instalar">📲 Instalar o app no celular</button>
   </header>
 
   <div class="painel">
-    <div class="linha">
-      <div>
-        <label for="jogo">Jogo</label>
-        <select id="jogo"></select>
+    <p class="titulo">1 · Escolha o jogo</p>
+    <div id="jogos" class="grade-jogos"></div>
+  </div>
+
+  <div class="painel">
+    <p class="titulo">2 · Estratégia</p>
+    <div id="estrategias" class="pilulas"></div>
+    <div class="rodape-controles">
+      <div class="stepper">
+        <button id="menos" aria-label="menos jogos">−</button>
+        <span><span id="qtd">3</span><small>jogos</small></span>
+        <button id="mais" aria-label="mais jogos">+</button>
       </div>
-      <div>
-        <label for="estrategia">Estratégia</label>
-        <select id="estrategia"></select>
-      </div>
-      <div>
-        <label for="quantidade">Jogos</label>
-        <input id="quantidade" type="number" min="1" max="20" value="3">
-      </div>
+      <button id="gerar" class="gerar">🎰 Gerar palpites</button>
     </div>
-    <button id="gerar">🎰 Gerar palpites</button>
-    <div class="demo">
-      <input type="checkbox" id="demo">
-      <label for="demo" style="margin:0">modo demo (dados sintéticos, sem baixar histórico)</label>
-    </div>
+    <label class="demo"><input type="checkbox" id="demo"> modo demo (dados sintéticos, sem baixar histórico)</label>
   </div>
 
   <div id="resultado"></div>
@@ -278,39 +418,60 @@ footer a{color:var(--verde)}
   jogos estatisticamente bem distribuídos a partir do histórico real, mas nenhum sistema aumenta
   a chance real de ganhar. Jogue com responsabilidade.</p>
 
-  <footer>SorteIA — código aberto em <a href="https://github.com/ademiragencia/sorteia">github.com/ademiragencia/sorteia</a></footer>
+  <footer>SorteIA · feito com 🍀 e estatística</footer>
 </div>
 
 <script>
-const rotulos={inteligente:"🧠 Inteligente (recomendada)",quentes:"🔥 Números quentes",atrasados:"⏳ Mais atrasados",equilibrado:"⚖️ Equilibrado",surpresa:"🎲 Surpresa"};
-const elJogo=document.getElementById("jogo"),elEstrategia=document.getElementById("estrategia"),
-      elQtd=document.getElementById("quantidade"),elDemo=document.getElementById("demo"),
-      elBotao=document.getElementById("gerar"),elResultado=document.getElementById("resultado");
+const rotulos={inteligente:"🧠 Inteligente",quentes:"🔥 Quentes",atrasados:"⏳ Atrasados",equilibrado:"⚖️ Equilibrado",surpresa:"🎲 Surpresa"};
+let jogoAtivo="megasena",estrategiaAtiva="inteligente",quantidade=3;
+const $=id=>document.getElementById(id);
 
-async function carregarJogos(){
-  const r=await fetch("/api/jogos");const d=await r.json();
-  elJogo.innerHTML=d.jogos.map(j=>`<option value="${j.slug}">${j.emoji} ${j.nome} — ${j.descricao}</option>`).join("");
-  elEstrategia.innerHTML=d.estrategias.map(e=>`<option value="${e}">${rotulos[e]||e}</option>`).join("");
-}
-carregarJogos();
-
-function bolas(nums,ehColuna){return nums.map(n=>`<span class="bola">${ehColuna?n:String(n).padStart(2,"0")}</span>`).join("")}
-
-elBotao.addEventListener("click",async()=>{
-  elBotao.disabled=true;
-  elBotao.innerHTML='<span class="girando">🎰</span> Analisando histórico...';
-  elResultado.innerHTML="";
+async function carregar(){
   try{
-    const p=new URLSearchParams({jogo:elJogo.value,n:elQtd.value,estrategia:elEstrategia.value});
-    if(elDemo.checked)p.set("demo","1");
+    const d=await (await fetch("/api/jogos")).json();
+    $("jogos").innerHTML=d.jogos.map(j=>
+      `<button class="chip-jogo${j.slug===jogoAtivo?" ativo":""}" data-slug="${j.slug}">
+         <em>${j.emoji}</em>${j.nome}<small>${j.descricao}</small></button>`).join("");
+    $("estrategias").innerHTML=d.estrategias.map(e=>
+      `<button class="pilula${e===estrategiaAtiva?" ativo":""}" data-e="${e}">${rotulos[e]||e}</button>`).join("");
+    document.querySelectorAll(".chip-jogo").forEach(b=>b.onclick=()=>{
+      jogoAtivo=b.dataset.slug;
+      document.querySelectorAll(".chip-jogo").forEach(x=>x.classList.toggle("ativo",x===b));
+    });
+    document.querySelectorAll(".pilula").forEach(b=>b.onclick=()=>{
+      estrategiaAtiva=b.dataset.e;
+      document.querySelectorAll(".pilula").forEach(x=>x.classList.toggle("ativo",x===b));
+    });
+  }catch(e){
+    $("resultado").innerHTML=`<div class="erro">😕 Não consegui carregar os jogos. Verifique a conexão e recarregue.</div>`;
+  }
+}
+carregar();
+
+$("menos").onclick=()=>{quantidade=Math.max(1,quantidade-1);$("qtd").textContent=quantidade};
+$("mais").onclick=()=>{quantidade=Math.min(20,quantidade+1);$("qtd").textContent=quantidade};
+
+function bola(n,i,trevo){
+  const texto=jogoAtivo==="supersete"?n:String(n).padStart(2,"0");
+  return `<span class="bola${trevo?" trevo":""}" style="animation-delay:${i*45}ms">${texto}</span>`;
+}
+
+$("gerar").onclick=async()=>{
+  const botao=$("gerar");
+  botao.disabled=true;botao.innerHTML='<span class="girando">🎰</span> Analisando histórico...';
+  $("resultado").innerHTML="";
+  try{
+    const p=new URLSearchParams({jogo:jogoAtivo,n:quantidade,estrategia:estrategiaAtiva});
+    if($("demo").checked)p.set("demo","1");
     const r=await fetch("/api/palpite?"+p);const d=await r.json();
     if(!r.ok)throw new Error(d.erro||"erro inesperado");
-    const ehColuna=d.jogo==="supersete";
-    let html=`<div class="painel"><div class="jogo-cabecalho"><strong>${d.emoji} ${d.nome}</strong>
-      <small>${rotulos[d.estrategia]||d.estrategia} · base: ${d.base_concursos} concursos${d.demo?" (demo)":""}</small></div>`;
+    let html=`<div class="painel"><div class="cabecalho-resultado"><strong>${d.emoji} ${d.nome}</strong>
+      <small>${rotulos[d.estrategia]||d.estrategia} · ${d.base_concursos} concursos analisados${d.demo?" (demo)":""}</small></div>`;
+    let seq=0;
     d.palpites.forEach((pal,i)=>{
-      html+=`<div class="palpite"><span class="rotulo">Jogo ${i+1}</span>${bolas(pal.numeros,ehColuna)}`;
-      if(pal.trevos&&pal.trevos.length)html+=`<span class="extra">🍀</span>`+pal.trevos.map(t=>`<span class="bola trevo">${t}</span>`).join("");
+      html+=`<div class="palpite"><span class="rotulo">Jogo ${i+1}</span>`;
+      html+=pal.numeros.map(n=>bola(n,seq++,false)).join("");
+      if(pal.trevos&&pal.trevos.length)html+=`<span class="extra">🍀</span>`+pal.trevos.map(t=>bola(t,seq++,true)).join("");
       if(pal.mes)html+=`<span class="extra">📅 ${pal.mes}</span>`;
       if(pal.afinidade)html+=`<span class="afinidade">afinidade ${(pal.afinidade*100).toFixed(0)}%</span>`;
       html+=`</div>`;
@@ -318,13 +479,28 @@ elBotao.addEventListener("click",async()=>{
     html+=`<p class="ultimo">Último concurso analisado: nº ${d.ultimo_concurso.numero}`+
       (d.ultimo_concurso.data?` (${d.ultimo_concurso.data})`:"")+
       ` — ${d.ultimo_concurso.dezenas.map(n=>String(n).padStart(2,"0")).join(" ")}</p></div>`;
-    elResultado.innerHTML=html;
+    $("resultado").innerHTML=html;
+    $("resultado").scrollIntoView({behavior:"smooth",block:"nearest"});
   }catch(erro){
-    elResultado.innerHTML=`<div class="erro">😕 ${erro.message}<br><small>Dica: marque o "modo demo" para testar sem depender das APIs de resultados.</small></div>`;
+    $("resultado").innerHTML=`<div class="erro">😕 ${erro.message}<br><small>Dica: marque o "modo demo" para testar sem depender das APIs de resultados.</small></div>`;
   }finally{
-    elBotao.disabled=false;elBotao.innerHTML="🎰 Gerar palpites";
+    botao.disabled=false;botao.innerHTML="🎰 Gerar palpites";
   }
+};
+
+// PWA: service worker + botão de instalação
+if("serviceWorker" in navigator)navigator.serviceWorker.register("/sw.js");
+let eventoInstalar=null;
+window.addEventListener("beforeinstallprompt",(e)=>{
+  e.preventDefault();eventoInstalar=e;$("instalar").classList.add("visivel");
 });
+$("instalar").onclick=async()=>{
+  if(!eventoInstalar)return;
+  eventoInstalar.prompt();
+  await eventoInstalar.userChoice;
+  eventoInstalar=null;$("instalar").classList.remove("visivel");
+};
+window.addEventListener("appinstalled",()=>$("instalar").classList.remove("visivel"));
 </script>
 </body>
 </html>
