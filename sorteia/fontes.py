@@ -105,7 +105,7 @@ def _baixar_comunitaria(jogo: Jogo) -> list[dict]:
     registros = [r for r in (_normalizar(b) for b in dados) if r]
     if not registros:
         raise ValueError("API comunitária não retornou concursos")
-    return registros
+    return sorted(registros, key=lambda c: c["concurso"])
 
 
 def _baixar_oficial(jogo: Jogo, existentes: dict[int, dict], log) -> list[dict]:
