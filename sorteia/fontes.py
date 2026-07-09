@@ -28,9 +28,15 @@ API_CAIXA = "https://servicebus2.caixa.gov.br/portaldeloterias/api/{slug}"
 
 DIRETORIO_DADOS = Path(os.environ.get("SORTEIA_DADOS", "dados"))
 
+# cabeçalhos de navegador: o WAF da Caixa recusa user-agents genéricos
 _HEADERS = {
-    "User-Agent": "SorteIA/1.0 (github.com/ademiragencia/sorteia)",
-    "Accept": "application/json",
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                   "Chrome/126.0.0.0 Safari/537.36"),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "pt-BR,pt;q=0.9",
+    "Referer": "https://loterias.caixa.gov.br/",
+    "Origin": "https://loterias.caixa.gov.br",
 }
 
 

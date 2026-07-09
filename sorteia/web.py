@@ -97,6 +97,18 @@ def _historico_oficial_recente(jogo, limite: int = LIMITE_FALLBACK) -> list[dict
     return sorted(registros, key=lambda c: c["concurso"])
 
 
+API_GUIDI = "https://api.guidi.dev.br/loteria/{slug}/ultimo"
+
+
+def _urls_ultimo(jogo) -> list[str]:
+    """Fontes do último concurso, da mais autoritativa para a reserva."""
+    return [
+        API_CAIXA.format(slug=jogo.slug),
+        API_GUIDI.format(slug=jogo.slug),
+        API_COMUNITARIA.format(slug=jogo.slug) + "/latest",
+    ]
+
+
 def _ultimo_oficial(jogo) -> dict | None:
     """Último concurso direto da API oficial da Caixa — fonte da verdade para
     premiação, prêmio estimado e data do próximo sorteio — com TTL curto."""
@@ -104,19 +116,19 @@ def _ultimo_oficial(jogo) -> dict | None:
     em_memoria = _memoria_ultimo.get(jogo.slug)
     if em_memoria and agora - em_memoria[0] < TTL_ULTIMO:
         return em_memoria[1]
-    registro = None
-    try:
-        registro = _normalizar(_get_json(API_CAIXA.format(slug=jogo.slug),
-                                         timeout=15))
-    except Exception:  # noqa: BLE001 - fallback deliberado
+    melhor: dict | None = None
+    for url in _urls_ultimo(jogo):
         try:
-            registro = _normalizar(_get_json(
-                API_COMUNITARIA.format(slug=jogo.slug) + "/latest", timeout=15))
-        except Exception:  # noqa: BLE001
-            registro = None
-    if registro:
-        _memoria_ultimo[jogo.slug] = (agora, registro)
-        return registro
+            registro = _normalizar(_get_json(url, timeout=15))
+        except Exception:  # noqa: BLE001 - tenta a próxima fonte
+            continue
+        if registro and (not melhor or registro["concurso"] > melhor["concurso"]):
+            melhor = registro
+            if url.startswith(API_CAIXA[:30]):
+                break  # fonte oficial: não precisa consultar as demais
+    if melhor:
+        _memoria_ultimo[jogo.slug] = (agora, melhor)
+        return melhor
     return em_memoria[1] if em_memoria else None
 
 
@@ -359,6 +371,7 @@ def _api_fontes(parametros: dict) -> dict:
     resultado: dict = {"jogo": jogo.slug}
     for nome, url in [
         ("oficial", API_CAIXA.format(slug=jogo.slug)),
+        ("guidi", API_GUIDI.format(slug=jogo.slug)),
         ("comunitaria_latest", API_COMUNITARIA.format(slug=jogo.slug) + "/latest"),
     ]:
         try:
