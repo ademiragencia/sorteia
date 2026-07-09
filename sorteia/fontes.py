@@ -78,6 +78,20 @@ def _normalizar(bruto: dict) -> dict | None:
     trevos = bruto.get("trevos") or bruto.get("trevosSorteados")
     if trevos:
         registro["trevos"] = [int(t) for t in trevos]
+    proximo: dict = {}
+    if bruto.get("dataProximoConcurso"):
+        proximo["data"] = bruto["dataProximoConcurso"]
+    try:
+        estimativa = float(bruto.get("valorEstimadoProximoConcurso") or 0)
+        if estimativa > 0:
+            proximo["estimativa"] = estimativa
+    except (TypeError, ValueError):
+        pass
+    acumulou = bruto.get("acumulou", bruto.get("acumulado"))
+    if acumulou is not None:
+        proximo["acumulou"] = bool(acumulou)
+    if proximo:
+        registro["proximo"] = proximo
     return registro
 
 

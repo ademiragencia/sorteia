@@ -7,6 +7,7 @@ Rotas:
     GET /api/jogos            → lista de jogos suportados
     GET /api/palpite          → ?jogo=megasena&n=3&estrategia=inteligente[&demo=1]
     GET /api/analise          → ?jogo=megasena[&demo=1]
+    GET /api/conferir         → ?jogo=megasena&numeros=4,8,15,16,23,42[&demo=1]
     GET /manifest.webmanifest → manifesto do PWA
     GET /sw.js                → service worker
     GET /icone-{180,192,512}.png → ícones gerados em tempo de execução
@@ -16,8 +17,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import urllib.parse
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
 # Em servidores serverless (Vercel) só /tmp é gravável.
@@ -40,6 +43,31 @@ from .palpite import ESTRATEGIAS, gerar
 TTL_CACHE = 6 * 60 * 60          # 6 horas
 LIMITE_FALLBACK = 400            # concursos recentes no fallback da API oficial
 _memoria: dict[str, tuple[float, list[dict]]] = {}
+
+# página de apostas de cada jogo no site oficial Loterias Online da Caixa
+APOSTA_URLS = {
+    "megasena": "mega-sena",
+    "lotofacil": "lotofacil",
+    "quina": "quina",
+    "lotomania": "lotomania",
+    "duplasena": "dupla-sena",
+    "timemania": "timemania",
+    "diadesorte": "dia-de-sorte",
+    "supersete": "super-sete",
+    "maismilionaria": "mais-milionaria",
+}
+
+# quantidade mínima de acertos que já rende alguma premiação (aposta simples)
+FAIXA_PREMIADA = {
+    "megasena": 4, "lotofacil": 11, "quina": 2, "lotomania": 15,
+    "duplasena": 3, "timemania": 3, "diadesorte": 4, "supersete": 3,
+    "maismilionaria": 2,
+}
+
+
+def _url_aposta(slug: str) -> str:
+    return ("https://www.loteriasonline.caixa.gov.br/silce-web/#/"
+            + APOSTA_URLS.get(slug, ""))
 
 
 def _historico_oficial_recente(jogo, limite: int = LIMITE_FALLBACK) -> list[dict]:
@@ -143,6 +171,8 @@ def _api_palpite(parametros: dict) -> dict:
         "estrategia": estrategia,
         "demo": usar_demo,
         "base_concursos": stats.total_concursos,
+        "aposta_url": _url_aposta(jogo.slug),
+        "proximo": ultimo.get("proximo", {}),
         "ultimo_concurso": {
             "numero": ultimo["concurso"],
             "data": ultimo.get("data", ""),
@@ -178,6 +208,85 @@ def _api_analise(parametros: dict) -> dict:
     }
 
 
+def _validar_numeros(jogo, numeros: list[int]) -> None:
+    if jogo.colunas:
+        if len(numeros) != jogo.colunas:
+            raise ValueError(f"{jogo.nome} precisa de exatamente "
+                             f"{jogo.colunas} dígitos (um por coluna)")
+        if any(n < 0 or n > 9 for n in numeros):
+            raise ValueError("cada coluna do Super Sete vai de 0 a 9")
+        return
+    universo = jogo.maximo - jogo.minimo + 1
+    fixa = jogo.marcados > jogo.sorteados  # Lotomania e Timemania: aposta fixa
+    minimo = jogo.marcados
+    maximo = jogo.marcados if fixa else min(jogo.marcados + 14, universo)
+    if not minimo <= len(numeros) <= maximo:
+        detalhe = (f"exatamente {minimo}" if minimo == maximo
+                   else f"de {minimo} a {maximo}")
+        raise ValueError(f"{jogo.nome} aceita {detalhe} números "
+                         f"(você digitou {len(numeros)})")
+    if len(set(numeros)) != len(numeros):
+        raise ValueError("há números repetidos na sua aposta")
+    fora = [n for n in numeros if not jogo.minimo <= n <= jogo.maximo]
+    if fora:
+        raise ValueError(f"números fora do volante ({jogo.minimo} a "
+                         f"{jogo.maximo}): {', '.join(map(str, fora))}")
+
+
+def _api_conferir(parametros: dict) -> dict:
+    jogo = obter_jogo(parametros.get("jogo", ["megasena"])[0])
+    usar_demo = parametros.get("demo", ["0"])[0] == "1"
+    bruto = parametros.get("numeros", [""])[0]
+    numeros = [int(x) for x in re.split(r"[^0-9]+", bruto) if x != ""]
+    if not numeros:
+        raise ValueError("digite os números da sua aposta")
+    _validar_numeros(jogo, numeros)
+
+    historico = _historico(jogo, usar_demo)
+    conjunto = set(numeros)
+
+    def acertos_no(sorteio: list[int]) -> int:
+        if jogo.colunas:
+            return sum(1 for meu, saiu in zip(numeros, sorteio) if meu == saiu)
+        return len(conjunto & set(sorteio))
+
+    distribuicao: Counter = Counter()
+    total_sorteios = 0
+    for concurso in historico:
+        for sorteio in concurso["sorteios"]:
+            distribuicao[acertos_no(sorteio)] += 1
+            total_sorteios += 1
+
+    ultimo = historico[-1]
+    sorteio_ultimo = ultimo["sorteios"][0]
+    if jogo.colunas:
+        acertados = [saiu for meu, saiu in zip(numeros, sorteio_ultimo) if meu == saiu]
+    else:
+        acertados = sorted(conjunto & set(sorteio_ultimo))
+
+    faixa_min = FAIXA_PREMIADA.get(jogo.slug, jogo.sorteados)
+    return {
+        "jogo": jogo.slug,
+        "nome": jogo.nome,
+        "emoji": jogo.emoji,
+        "demo": usar_demo,
+        "numeros": numeros,
+        "faixa_premiada_min": faixa_min,
+        "ultimo": {
+            "numero": ultimo["concurso"],
+            "data": ultimo.get("data", ""),
+            "dezenas": sorteio_ultimo,
+            "acertos": len(acertados),
+            "acertados": acertados,
+        },
+        "historico": {
+            "total_sorteios": total_sorteios,
+            "distribuicao": {str(k): v for k, v in sorted(distribuicao.items())},
+            "melhor": max(distribuicao) if distribuicao else 0,
+        },
+    }
+
+
 def app(environ, start_response):
     caminho = environ.get("PATH_INFO", "/") or "/"
     parametros = urllib.parse.parse_qs(environ.get("QUERY_STRING", ""))
@@ -192,6 +301,8 @@ def app(environ, start_response):
             return _json_resposta(start_response, _api_palpite(parametros))
         if caminho == "/api/analise":
             return _json_resposta(start_response, _api_analise(parametros))
+        if caminho == "/api/conferir":
+            return _json_resposta(start_response, _api_conferir(parametros))
         if caminho == "/manifest.webmanifest":
             return _resposta(start_response, MANIFESTO.encode("utf-8"),
                              "application/manifest+json; charset=utf-8",
@@ -207,7 +318,9 @@ def app(environ, start_response):
         return _json_resposta(start_response, {"erro": "rota não encontrada"},
                               "404 Not Found")
     except (KeyError, ValueError) as erro:
-        return _json_resposta(start_response, {"erro": str(erro)}, "400 Bad Request")
+        mensagem = erro.args[0] if erro.args else str(erro)
+        return _json_resposta(start_response, {"erro": str(mensagem)},
+                              "400 Bad Request")
     except Exception as erro:  # noqa: BLE001 - resposta amigável para falha de rede
         return _json_resposta(
             start_response,
@@ -236,7 +349,7 @@ MANIFESTO = json.dumps({
 }, ensure_ascii=False)
 
 
-SERVICE_WORKER = """const CACHE = "sorteia-v2";
+SERVICE_WORKER = """const CACHE = "sorteia-v3";
 const SHELL = ["/", "/manifest.webmanifest", "/icone-192.png", "/icone-512.png"];
 
 self.addEventListener("install", (e) => {
@@ -362,6 +475,12 @@ h1 span{background:linear-gradient(90deg,var(--verde),#7df0b4);-webkit-backgroun
 
 .cabecalho-resultado{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:6px;margin-bottom:10px}
 .cabecalho-resultado small{color:var(--suave)}
+.proximo{
+  display:flex;align-items:center;flex-wrap:wrap;gap:8px;background:rgba(255,207,77,.09);
+  border:1px solid rgba(255,207,77,.35);border-radius:12px;padding:10px 12px;margin-bottom:12px;
+  color:#ffe9ad;font-size:.86rem;line-height:1.4
+}
+.badge{background:var(--ouro);color:#3a2c00;font-weight:800;font-size:.68rem;border-radius:999px;padding:3px 10px;letter-spacing:.5px}
 .palpite{display:flex;flex-wrap:wrap;align-items:center;gap:7px;padding:12px 4px;border-bottom:1px dashed var(--borda)}
 .palpite:last-of-type{border-bottom:0}
 .rotulo{color:var(--suave);font-size:.72rem;min-width:52px;font-weight:700;text-transform:uppercase;letter-spacing:1px}
@@ -373,10 +492,33 @@ h1 span{background:linear-gradient(90deg,var(--verde),#7df0b4);-webkit-backgroun
 }
 @keyframes pop{from{transform:scale(.2) rotate(-18deg);opacity:0}}
 .bola.trevo{background:radial-gradient(circle at 30% 26%,rgba(255,255,255,.4),transparent 42%),linear-gradient(160deg,var(--ouro),#d19a12)}
+.bola.fraca{background:#232e4d;color:var(--suave);box-shadow:none}
 .extra{color:var(--ouro);font-size:.88rem;font-weight:700}
 .afinidade{margin-left:auto;color:var(--suave);font-size:.72rem}
+.mini{
+  border:1px solid var(--borda);background:#0f1730;color:var(--suave);border-radius:10px;
+  padding:6px 10px;font-size:.72rem;cursor:pointer;font-weight:700
+}
+.mini:hover{color:var(--verde);border-color:var(--verde)}
+.btn-caixa{
+  display:block;text-align:center;margin-top:14px;padding:13px;border-radius:14px;
+  background:rgba(46,227,131,.12);border:1px solid var(--verde);color:var(--verde);
+  font-weight:800;text-decoration:none;font-size:.95rem
+}
+.btn-caixa:active{transform:scale(.99)}
+.nota-caixa{color:var(--suave);font-size:.7rem;text-align:center;margin-top:6px}
 .ultimo{color:var(--suave);font-size:.82rem;margin-top:12px;line-height:1.5}
 .erro{background:#381d27;border:1px solid #7c3242;color:#ffb9c5;border-radius:16px;padding:14px;margin-top:4px;font-size:.92rem;line-height:1.5}
+
+.campo{width:100%;background:#0f1730;color:var(--texto);border:1px solid var(--borda);border-radius:14px;
+  padding:13px 14px;font-size:1rem;margin-bottom:10px}
+.campo::placeholder{color:#5f6d8c}
+.secundario{background:linear-gradient(135deg,#3d6bff,#2748b8);color:#eaf0ff;box-shadow:0 10px 26px rgba(61,107,255,.25)}
+.resultado-conferencia{margin-top:14px}
+.placar{font-size:1.05rem;font-weight:800;margin:10px 0 6px}
+.placar.premiado{color:var(--ouro)}
+.tabela-faixas{color:var(--suave);font-size:.85rem;line-height:1.7;margin-top:8px}
+.tabela-faixas strong{color:var(--texto)}
 
 .aviso{color:var(--suave);font-size:.78rem;line-height:1.6;text-align:center;margin-top:24px;padding:0 10px}
 footer{text-align:center;color:#5f6d8c;font-size:.75rem;margin-top:26px}
@@ -414,6 +556,14 @@ footer{text-align:center;color:#5f6d8c;font-size:.75rem;margin-top:26px}
 
   <div id="resultado"></div>
 
+  <div class="painel">
+    <p class="titulo">3 · Confira seu jogo</p>
+    <input id="meujogo" class="campo" inputmode="numeric"
+           placeholder="Digite seus números, ex.: 04 08 15 16 23 42">
+    <button id="conferir" class="gerar secundario">🔎 Conferir no último sorteio</button>
+    <div id="conferencia" class="resultado-conferencia"></div>
+  </div>
+
   <p class="aviso">⚠️ Todo sorteio da Caixa é aleatório e independente do passado. O SorteIA gera
   jogos estatisticamente bem distribuídos a partir do histórico real, mas nenhum sistema aumenta
   a chance real de ganhar. Jogue com responsabilidade.</p>
@@ -425,6 +575,7 @@ footer{text-align:center;color:#5f6d8c;font-size:.75rem;margin-top:26px}
 const rotulos={inteligente:"🧠 Inteligente",quentes:"🔥 Quentes",atrasados:"⏳ Atrasados",equilibrado:"⚖️ Equilibrado",surpresa:"🎲 Surpresa"};
 let jogoAtivo="megasena",estrategiaAtiva="inteligente",quantidade=3;
 const $=id=>document.getElementById(id);
+const brl=v=>new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL",maximumFractionDigits:0}).format(v);
 
 async function carregar(){
   try{
@@ -437,6 +588,7 @@ async function carregar(){
     document.querySelectorAll(".chip-jogo").forEach(b=>b.onclick=()=>{
       jogoAtivo=b.dataset.slug;
       document.querySelectorAll(".chip-jogo").forEach(x=>x.classList.toggle("ativo",x===b));
+      $("conferencia").innerHTML="";
     });
     document.querySelectorAll(".pilula").forEach(b=>b.onclick=()=>{
       estrategiaAtiva=b.dataset.e;
@@ -451,9 +603,18 @@ carregar();
 $("menos").onclick=()=>{quantidade=Math.max(1,quantidade-1);$("qtd").textContent=quantidade};
 $("mais").onclick=()=>{quantidade=Math.min(20,quantidade+1);$("qtd").textContent=quantidade};
 
-function bola(n,i,trevo){
-  const texto=jogoAtivo==="supersete"?n:String(n).padStart(2,"0");
-  return `<span class="bola${trevo?" trevo":""}" style="animation-delay:${i*45}ms">${texto}</span>`;
+const fmt=n=>jogoAtivo==="supersete"?String(n):String(n).padStart(2,"0");
+function bola(n,i,classes){return `<span class="bola${classes||""}" style="animation-delay:${i*45}ms">${fmt(n)}</span>`}
+
+function barraProximo(d){
+  const p=d.proximo||{};
+  if(!p.data&&!p.estimativa)return "";
+  let html=`<div class="proximo">`;
+  if(p.acumulou)html+=`<span class="badge">ACUMULOU!</span>`;
+  html+=`🗓️ Próximo sorteio${p.data?`: <strong>${p.data}</strong>`:""}`;
+  if(p.estimativa)html+=` · 💰 prêmio estimado <strong>${brl(p.estimativa)}</strong>`;
+  html+=`</div>`;
+  return html;
 }
 
 $("gerar").onclick=async()=>{
@@ -467,24 +628,68 @@ $("gerar").onclick=async()=>{
     if(!r.ok)throw new Error(d.erro||"erro inesperado");
     let html=`<div class="painel"><div class="cabecalho-resultado"><strong>${d.emoji} ${d.nome}</strong>
       <small>${rotulos[d.estrategia]||d.estrategia} · ${d.base_concursos} concursos analisados${d.demo?" (demo)":""}</small></div>`;
+    html+=barraProximo(d);
     let seq=0;
     d.palpites.forEach((pal,i)=>{
+      const texto=pal.numeros.map(fmt).join(" ");
       html+=`<div class="palpite"><span class="rotulo">Jogo ${i+1}</span>`;
-      html+=pal.numeros.map(n=>bola(n,seq++,false)).join("");
-      if(pal.trevos&&pal.trevos.length)html+=`<span class="extra">🍀</span>`+pal.trevos.map(t=>bola(t,seq++,true)).join("");
+      html+=pal.numeros.map(n=>bola(n,seq++)).join("");
+      if(pal.trevos&&pal.trevos.length)html+=`<span class="extra">🍀</span>`+pal.trevos.map(t=>bola(t,seq++," trevo")).join("");
       if(pal.mes)html+=`<span class="extra">📅 ${pal.mes}</span>`;
+      html+=`<button class="mini copiar" data-numeros="${texto}">📋 copiar</button>`;
       if(pal.afinidade)html+=`<span class="afinidade">afinidade ${(pal.afinidade*100).toFixed(0)}%</span>`;
       html+=`</div>`;
     });
-    html+=`<p class="ultimo">Último concurso analisado: nº ${d.ultimo_concurso.numero}`+
+    html+=`<a class="btn-caixa" href="${d.aposta_url}" target="_blank" rel="noopener">🎯 Apostar no site oficial da Caixa</a>`;
+    html+=`<p class="nota-caixa">Copie os números e marque no volante oficial — a aposta é registrada só nos canais da Caixa.</p>`;
+    html+=`<p class="ultimo">Último concurso: nº ${d.ultimo_concurso.numero}`+
       (d.ultimo_concurso.data?` (${d.ultimo_concurso.data})`:"")+
-      ` — ${d.ultimo_concurso.dezenas.map(n=>String(n).padStart(2,"0")).join(" ")}</p></div>`;
+      ` — ${d.ultimo_concurso.dezenas.map(fmt).join(" ")}</p></div>`;
     $("resultado").innerHTML=html;
+    document.querySelectorAll(".copiar").forEach(b=>b.onclick=async()=>{
+      try{await navigator.clipboard.writeText(b.dataset.numeros)}catch(e){}
+      b.textContent="✓ copiado";setTimeout(()=>b.textContent="📋 copiar",1600);
+    });
     $("resultado").scrollIntoView({behavior:"smooth",block:"nearest"});
   }catch(erro){
     $("resultado").innerHTML=`<div class="erro">😕 ${erro.message}<br><small>Dica: marque o "modo demo" para testar sem depender das APIs de resultados.</small></div>`;
   }finally{
     botao.disabled=false;botao.innerHTML="🎰 Gerar palpites";
+  }
+};
+
+$("conferir").onclick=async()=>{
+  const botao=$("conferir");
+  botao.disabled=true;botao.innerHTML='<span class="girando">🔎</span> Conferindo...';
+  $("conferencia").innerHTML="";
+  try{
+    const p=new URLSearchParams({jogo:jogoAtivo,numeros:$("meujogo").value});
+    if($("demo").checked)p.set("demo","1");
+    const r=await fetch("/api/conferir?"+p);const d=await r.json();
+    if(!r.ok)throw new Error(d.erro||"erro inesperado");
+    const acertados=new Set(d.ultimo.acertados.map(String));
+    const posicional=d.jogo==="supersete";
+    let html=`<div class="palpite">`;
+    html+=d.numeros.map((n,i)=>{
+      const acertou=posicional?d.ultimo.dezenas[i]===n:acertados.has(String(n));
+      return bola(n,i,acertou?"":" fraca");
+    }).join("");
+    html+=`</div>`;
+    const premiado=d.ultimo.acertos>=d.faixa_premiada_min;
+    html+=`<p class="placar${premiado?" premiado":""}">${premiado?"🏆":"🎯"} ${d.ultimo.acertos} acerto${d.ultimo.acertos===1?"":"s"} no concurso ${d.ultimo.numero}${d.ultimo.data?` (${d.ultimo.data})`:""}${premiado?" — faixa premiada!":""}</p>`;
+    html+=`<p class="ultimo">Resultado: ${d.ultimo.dezenas.map(fmt).join(" ")}</p>`;
+    const dist=d.historico.distribuicao;
+    const faixas=Object.keys(dist).map(Number).filter(a=>a>=d.faixa_premiada_min).sort((a,b)=>b-a);
+    let linhas=faixas.map(a=>`<strong>${a} acertos</strong>: ${dist[a]||0}x`);
+    if(d.jogo==="lotomania")linhas.push(`<strong>0 acertos</strong> (também premia): ${dist["0"]||0}x`);
+    html+=`<div class="tabela-faixas">📊 Se você tivesse jogado esses números em todos os ${d.historico.total_sorteios} sorteios da história${d.demo?" (demo)":""}:<br>`+
+      (linhas.length?linhas.join(" · "):"nenhuma faixa premiada seria atingida")+
+      `<br>Melhor resultado possível: <strong>${d.historico.melhor} acertos</strong>.</div>`;
+    $("conferencia").innerHTML=html;
+  }catch(erro){
+    $("conferencia").innerHTML=`<div class="erro">😕 ${erro.message}</div>`;
+  }finally{
+    botao.disabled=false;botao.innerHTML="🔎 Conferir no último sorteio";
   }
 };
 
