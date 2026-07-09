@@ -1,8 +1,11 @@
 """Testes da interface web (WSGI) — rode com: python -m unittest discover testes"""
 
 import json
+import time
 import unittest
 
+from sorteia import web
+from sorteia.jogos import JOGOS
 from sorteia.web import app
 
 
@@ -66,6 +69,44 @@ class TestApiStatus(unittest.TestCase):
         status, d = chamar("/api/status?jogo=duplasena&demo=1")
         self.assertEqual(status, 200)
         self.assertEqual(len(d["ultimo"]["dezenas2"]), 6)
+
+
+class TestMesclarUltimo(unittest.TestCase):
+    def setUp(self):
+        self.jogo = JOGOS["megasena"]
+        web._memoria_ultimo.clear()
+
+    def tearDown(self):
+        web._memoria_ultimo.clear()
+
+    def _injetar(self, registro):
+        # simula um "último concurso" fresco vindo da API oficial
+        web._memoria_ultimo[self.jogo.slug] = (time.time(), registro)
+
+    def test_substitui_mesmo_concurso_com_dados_frescos(self):
+        cache = [{"concurso": 100, "sorteios": [[1, 2, 3, 4, 5, 6]],
+                  "proximo": {"estimativa": 1_000_000.0}}]
+        fresco = {"concurso": 100, "sorteios": [[1, 2, 3, 4, 5, 6]],
+                  "proximo": {"estimativa": 2_000_000.0}}
+        self._injetar(fresco)
+        saida = web._mesclar_ultimo(self.jogo, cache)
+        self.assertEqual(saida[-1]["proximo"]["estimativa"], 2_000_000.0)
+        self.assertEqual(len(saida), 1)
+
+    def test_anexa_concurso_novo(self):
+        cache = [{"concurso": 100, "sorteios": [[1, 2, 3, 4, 5, 6]]}]
+        fresco = {"concurso": 101, "sorteios": [[7, 8, 9, 10, 11, 12]]}
+        self._injetar(fresco)
+        saida = web._mesclar_ultimo(self.jogo, cache)
+        self.assertEqual(len(saida), 2)
+        self.assertEqual(saida[-1]["concurso"], 101)
+
+    def test_ignora_ultimo_mais_antigo_que_o_cache(self):
+        cache = [{"concurso": 100, "sorteios": [[1, 2, 3, 4, 5, 6]]}]
+        self._injetar({"concurso": 99, "sorteios": [[7, 8, 9, 10, 11, 12]]})
+        saida = web._mesclar_ultimo(self.jogo, cache)
+        self.assertEqual(len(saida), 1)
+        self.assertEqual(saida[-1]["concurso"], 100)
 
 
 class TestApiConferir(unittest.TestCase):

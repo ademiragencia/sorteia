@@ -31,6 +31,7 @@ from .analise import analisar
 from .demo import gerar_historico
 from .fontes import (
     API_CAIXA,
+    API_COMUNITARIA,
     _baixar_comunitaria,
     _get_json,
     _normalizar,
@@ -40,9 +41,11 @@ from .fontes import (
 from .jogos import JOGOS, obter_jogo
 from .palpite import ESTRATEGIAS, gerar
 
-TTL_CACHE = 6 * 60 * 60          # 6 horas
+TTL_CACHE = 6 * 60 * 60          # histórico completo: 6 horas
+TTL_ULTIMO = 10 * 60             # último concurso (prêmios/estimativas): 10 min
 LIMITE_FALLBACK = 400            # concursos recentes no fallback da API oficial
 _memoria: dict[str, tuple[float, list[dict]]] = {}
+_memoria_ultimo: dict[str, tuple[float, dict]] = {}
 
 # página de apostas de cada jogo no site oficial Loterias Online da Caixa
 APOSTA_URLS = {
@@ -94,13 +97,49 @@ def _historico_oficial_recente(jogo, limite: int = LIMITE_FALLBACK) -> list[dict
     return sorted(registros, key=lambda c: c["concurso"])
 
 
+def _ultimo_oficial(jogo) -> dict | None:
+    """Último concurso direto da API oficial da Caixa — fonte da verdade para
+    premiação, prêmio estimado e data do próximo sorteio — com TTL curto."""
+    agora = time.time()
+    em_memoria = _memoria_ultimo.get(jogo.slug)
+    if em_memoria and agora - em_memoria[0] < TTL_ULTIMO:
+        return em_memoria[1]
+    registro = None
+    try:
+        registro = _normalizar(_get_json(API_CAIXA.format(slug=jogo.slug),
+                                         timeout=15))
+    except Exception:  # noqa: BLE001 - fallback deliberado
+        try:
+            registro = _normalizar(_get_json(
+                API_COMUNITARIA.format(slug=jogo.slug) + "/latest", timeout=15))
+        except Exception:  # noqa: BLE001
+            registro = None
+    if registro:
+        _memoria_ultimo[jogo.slug] = (agora, registro)
+        return registro
+    return em_memoria[1] if em_memoria else None
+
+
+def _mesclar_ultimo(jogo, concursos: list[dict]) -> list[dict]:
+    """Garante que o concurso mais recente (e seus prêmios) esteja fresco."""
+    ultimo = _ultimo_oficial(jogo)
+    if not ultimo or not concursos:
+        return concursos
+    mais_novo = concursos[-1]
+    if ultimo["concurso"] == mais_novo["concurso"]:
+        concursos[-1] = ultimo          # estimativas/premiação atualizadas
+    elif ultimo["concurso"] > mais_novo["concurso"]:
+        concursos.append(ultimo)        # saiu concurso novo depois do cache
+    return concursos
+
+
 def _historico(jogo, usar_demo: bool) -> list[dict]:
     if usar_demo:
         return gerar_historico(jogo)
     agora = time.time()
     em_memoria = _memoria.get(jogo.slug)
     if em_memoria and agora - em_memoria[0] < TTL_CACHE:
-        return em_memoria[1]
+        return _mesclar_ultimo(jogo, em_memoria[1])
     concursos = carregar_cache(jogo)
     if not concursos or agora - _memoria.get(jogo.slug, (0,))[0] > TTL_CACHE:
         try:
@@ -113,7 +152,7 @@ def _historico(jogo, usar_demo: bool) -> list[dict]:
         except OSError:
             pass  # disco somente leitura: segue só com a memória
     _memoria[jogo.slug] = (agora, concursos)
-    return concursos
+    return _mesclar_ultimo(jogo, concursos)
 
 
 def _resposta(start_response, dados: bytes, tipo: str, status: str = "200 OK",
