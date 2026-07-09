@@ -80,7 +80,10 @@ def _normalizar(bruto: dict) -> dict | None:
     }
     mes = bruto.get("mesSorte") or bruto.get("nomeTimeCoracaoMesSorte")
     if mes:
-        registro["mes"] = str(mes).strip().title()
+        # algumas fontes devolvem lixo (bytes nulos) neste campo
+        mes = str(mes).replace("\x00", "").strip()
+        if mes:
+            registro["mes"] = mes.title()
     trevos = bruto.get("trevos") or bruto.get("trevosSorteados")
     if trevos:
         registro["trevos"] = [int(t) for t in trevos]
