@@ -208,6 +208,33 @@ def _api_analise(parametros: dict) -> dict:
     }
 
 
+def _api_status(parametros: dict) -> dict:
+    """Resultado mais recente do jogo: dezenas, premiação e próximo concurso."""
+    jogo = obter_jogo(parametros.get("jogo", ["megasena"])[0])
+    usar_demo = parametros.get("demo", ["0"])[0] == "1"
+    historico = _historico(jogo, usar_demo)
+    ultimo = historico[-1]
+    return {
+        "jogo": jogo.slug,
+        "nome": jogo.nome,
+        "emoji": jogo.emoji,
+        "demo": usar_demo,
+        "total_concursos": len(historico),
+        "aposta_url": _url_aposta(jogo.slug),
+        "proximo": ultimo.get("proximo", {}),
+        "ultimo": {
+            "numero": ultimo["concurso"],
+            "data": ultimo.get("data", ""),
+            "dezenas": ultimo["sorteios"][0],
+            "dezenas2": (ultimo["sorteios"][1]
+                         if len(ultimo["sorteios"]) > 1 else []),
+            "mes": ultimo.get("mes"),
+            "trevos": ultimo.get("trevos", []),
+            "premiacoes": ultimo.get("premiacoes", []),
+        },
+    }
+
+
 def _validar_numeros(jogo, numeros: list[int]) -> None:
     if jogo.colunas:
         if len(numeros) != jogo.colunas:
@@ -303,6 +330,8 @@ def app(environ, start_response):
             return _json_resposta(start_response, _api_analise(parametros))
         if caminho == "/api/conferir":
             return _json_resposta(start_response, _api_conferir(parametros))
+        if caminho == "/api/status":
+            return _json_resposta(start_response, _api_status(parametros))
         if caminho == "/manifest.webmanifest":
             return _resposta(start_response, MANIFESTO.encode("utf-8"),
                              "application/manifest+json; charset=utf-8",
@@ -493,13 +522,14 @@ h1 span{background:linear-gradient(90deg,var(--verde),#7df0b4);-webkit-backgroun
 @keyframes pop{from{transform:scale(.2) rotate(-18deg);opacity:0}}
 .bola.trevo{background:radial-gradient(circle at 30% 26%,rgba(255,255,255,.4),transparent 42%),linear-gradient(160deg,var(--ouro),#d19a12)}
 .bola.fraca{background:#232e4d;color:var(--suave);box-shadow:none}
+.bola.mini{width:34px;height:34px;font-size:.82rem;animation:none}
 .extra{color:var(--ouro);font-size:.88rem;font-weight:700}
 .afinidade{margin-left:auto;color:var(--suave);font-size:.72rem}
-.mini{
+.botao-mini{
   border:1px solid var(--borda);background:#0f1730;color:var(--suave);border-radius:10px;
   padding:6px 10px;font-size:.72rem;cursor:pointer;font-weight:700
 }
-.mini:hover{color:var(--verde);border-color:var(--verde)}
+.botao-mini:hover{color:var(--verde);border-color:var(--verde)}
 .btn-caixa{
   display:block;text-align:center;margin-top:14px;padding:13px;border-radius:14px;
   background:rgba(46,227,131,.12);border:1px solid var(--verde);color:var(--verde);
@@ -540,6 +570,8 @@ footer{text-align:center;color:#5f6d8c;font-size:.75rem;margin-top:26px}
     <div id="jogos" class="grade-jogos"></div>
   </div>
 
+  <div class="painel" id="painel-status" hidden></div>
+
   <div class="painel">
     <p class="titulo">2 · Estratégia</p>
     <div id="estrategias" class="pilulas"></div>
@@ -557,10 +589,10 @@ footer{text-align:center;color:#5f6d8c;font-size:.75rem;margin-top:26px}
   <div id="resultado"></div>
 
   <div class="painel">
-    <p class="titulo">3 · Confira seu jogo</p>
+    <p class="titulo">3 · Confira seu jogo — <span id="conferir-jogo">Mega-Sena</span></p>
     <input id="meujogo" class="campo" inputmode="numeric"
            placeholder="Digite seus números, ex.: 04 08 15 16 23 42">
-    <button id="conferir" class="gerar secundario">🔎 Conferir no último sorteio</button>
+    <button id="conferir" class="gerar secundario">🔎 Conferir na Mega-Sena</button>
     <div id="conferencia" class="resultado-conferencia"></div>
   </div>
 
@@ -573,13 +605,57 @@ footer{text-align:center;color:#5f6d8c;font-size:.75rem;margin-top:26px}
 
 <script>
 const rotulos={inteligente:"🧠 Inteligente",quentes:"🔥 Quentes",atrasados:"⏳ Atrasados",equilibrado:"⚖️ Equilibrado",surpresa:"🎲 Surpresa"};
-let jogoAtivo="megasena",estrategiaAtiva="inteligente",quantidade=3;
+let jogoAtivo="megasena",estrategiaAtiva="inteligente",quantidade=3,mapaJogos={};
 const $=id=>document.getElementById(id);
 const brl=v=>new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL",maximumFractionDigits:0}).format(v);
+const brl2=v=>new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL"}).format(v);
+
+function atualizarConferidor(){
+  const j=mapaJogos[jogoAtivo]||{nome:jogoAtivo,emoji:""};
+  $("conferir-jogo").textContent=`${j.emoji} ${j.nome}`;
+  $("conferir").innerHTML=`🔎 Conferir na ${j.nome}`;
+  $("meujogo").placeholder=jogoAtivo==="supersete"
+    ?"Digite os 7 dígitos, um por coluna, ex.: 3 1 4 1 5 9 2"
+    :`Digite os números que você jogou na ${j.nome}`;
+}
+
+async function mostrarStatus(){
+  const alvo=$("painel-status");
+  alvo.hidden=false;
+  alvo.innerHTML=`<p class="titulo">Resultado mais recente</p><p class="ultimo"><span class="girando">🎰</span> Carregando o último sorteio...</p>`;
+  try{
+    const p=new URLSearchParams({jogo:jogoAtivo});
+    if($("demo").checked)p.set("demo","1");
+    const r=await fetch("/api/status?"+p);const d=await r.json();
+    if(!r.ok)throw new Error(d.erro||"erro");
+    const f=n=>d.jogo==="supersete"?String(n):String(n).padStart(2,"0");
+    let html=`<p class="titulo">Resultado mais recente${d.demo?" (demo)":""}</p>`;
+    html+=`<div class="cabecalho-resultado"><strong>${d.emoji} ${d.nome} · concurso ${d.ultimo.numero}</strong><small>${d.ultimo.data||""}</small></div>`;
+    html+=`<div class="palpite" style="border:0;padding:4px 0">`+d.ultimo.dezenas.map(n=>`<span class="bola mini">${f(n)}</span>`).join("");
+    if(d.ultimo.trevos&&d.ultimo.trevos.length)html+=`<span class="extra">🍀</span>`+d.ultimo.trevos.map(t=>`<span class="bola mini trevo">${t}</span>`).join("");
+    if(d.ultimo.mes)html+=`<span class="extra">📅 ${d.ultimo.mes}</span>`;
+    html+=`</div>`;
+    if(d.ultimo.dezenas2&&d.ultimo.dezenas2.length){
+      html+=`<div class="palpite" style="border:0;padding:4px 0"><span class="rotulo">2º sorteio</span>`+d.ultimo.dezenas2.map(n=>`<span class="bola mini">${f(n)}</span>`).join("")+`</div>`;
+    }
+    if(d.ultimo.premiacoes&&d.ultimo.premiacoes.length){
+      html+=`<div class="tabela-faixas">🏆 Premiação do concurso:<br>`+d.ultimo.premiacoes.map(x=>{
+        const g=x.ganhadores;
+        const quem=g===0?"ninguém acertou — acumulou":`${g} ganhador${g===1?"":"es"}`+(x.valor?` · ${brl2(x.valor)} cada`:"");
+        return `<strong>${x.descricao}</strong>: ${quem}`;
+      }).join("<br>")+`</div>`;
+    }
+    html+=barraProximo(d);
+    alvo.innerHTML=html;
+  }catch(e){
+    alvo.innerHTML=`<p class="titulo">Resultado mais recente</p><p class="ultimo">Não consegui carregar o resultado agora — tente de novo em instantes.</p>`;
+  }
+}
 
 async function carregar(){
   try{
     const d=await (await fetch("/api/jogos")).json();
+    d.jogos.forEach(j=>mapaJogos[j.slug]=j);
     $("jogos").innerHTML=d.jogos.map(j=>
       `<button class="chip-jogo${j.slug===jogoAtivo?" ativo":""}" data-slug="${j.slug}">
          <em>${j.emoji}</em>${j.nome}<small>${j.descricao}</small></button>`).join("");
@@ -588,8 +664,10 @@ async function carregar(){
     document.querySelectorAll(".chip-jogo").forEach(b=>b.onclick=()=>{
       jogoAtivo=b.dataset.slug;
       document.querySelectorAll(".chip-jogo").forEach(x=>x.classList.toggle("ativo",x===b));
-      $("conferencia").innerHTML="";
+      $("conferencia").innerHTML="";$("meujogo").value="";
+      atualizarConferidor();mostrarStatus();
     });
+    atualizarConferidor();mostrarStatus();
     document.querySelectorAll(".pilula").forEach(b=>b.onclick=()=>{
       estrategiaAtiva=b.dataset.e;
       document.querySelectorAll(".pilula").forEach(x=>x.classList.toggle("ativo",x===b));
@@ -636,7 +714,7 @@ $("gerar").onclick=async()=>{
       html+=pal.numeros.map(n=>bola(n,seq++)).join("");
       if(pal.trevos&&pal.trevos.length)html+=`<span class="extra">🍀</span>`+pal.trevos.map(t=>bola(t,seq++," trevo")).join("");
       if(pal.mes)html+=`<span class="extra">📅 ${pal.mes}</span>`;
-      html+=`<button class="mini copiar" data-numeros="${texto}">📋 copiar</button>`;
+      html+=`<button class="botao-mini copiar" data-numeros="${texto}">📋 copiar</button>`;
       if(pal.afinidade)html+=`<span class="afinidade">afinidade ${(pal.afinidade*100).toFixed(0)}%</span>`;
       html+=`</div>`;
     });
@@ -689,9 +767,10 @@ $("conferir").onclick=async()=>{
   }catch(erro){
     $("conferencia").innerHTML=`<div class="erro">😕 ${erro.message}</div>`;
   }finally{
-    botao.disabled=false;botao.innerHTML="🔎 Conferir no último sorteio";
+    botao.disabled=false;atualizarConferidor();
   }
 };
+$("demo").addEventListener("change",mostrarStatus);
 
 // PWA: service worker + botão de instalação
 if("serviceWorker" in navigator)navigator.serviceWorker.register("/sw.js");

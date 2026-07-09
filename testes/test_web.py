@@ -54,6 +54,20 @@ class TestApiPalpite(unittest.TestCase):
         self.assertEqual(d["ultimo_concurso"]["numero"], d["base_concursos"])
 
 
+class TestApiStatus(unittest.TestCase):
+    def test_status_demo(self):
+        status, d = chamar("/api/status?jogo=megasena&demo=1")
+        self.assertEqual(status, 200)
+        self.assertEqual(d["ultimo"]["numero"], d["total_concursos"])
+        self.assertTrue(d["ultimo"]["premiacoes"])
+        self.assertIn("estimativa", d["proximo"])
+
+    def test_status_duplasena_dois_sorteios(self):
+        status, d = chamar("/api/status?jogo=duplasena&demo=1")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(d["ultimo"]["dezenas2"]), 6)
+
+
 class TestApiConferir(unittest.TestCase):
     def test_conferir_demo(self):
         status, d = chamar("/api/conferir?jogo=megasena&numeros=1,2,3,4,5,6&demo=1")

@@ -92,6 +92,20 @@ def _normalizar(bruto: dict) -> dict | None:
         proximo["acumulou"] = bool(acumulou)
     if proximo:
         registro["proximo"] = proximo
+    faixas = []
+    for faixa in bruto.get("premiacoes") or bruto.get("listaRateioPremio") or []:
+        try:
+            faixas.append({
+                "descricao": str(faixa.get("descricao")
+                                 or faixa.get("descricaoFaixa") or "").strip(),
+                "ganhadores": int(faixa.get("ganhadores",
+                                            faixa.get("numeroDeGanhadores", 0)) or 0),
+                "valor": float(faixa.get("valorPremio", 0) or 0),
+            })
+        except (TypeError, ValueError):
+            continue
+    if faixas:
+        registro["premiacoes"] = faixas
     return registro
 
 

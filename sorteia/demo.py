@@ -39,6 +39,16 @@ def gerar_historico(jogo: Jogo, concursos: int = 500, semente: int = 42) -> list
         if jogo.trevos:
             registro["trevos"] = sorted(rng.sample(range(1, 7), jogo.trevos))
         historico.append(registro)
+    sorteados = jogo.colunas or jogo.sorteados
+    historico[-1]["premiacoes"] = [
+        {"descricao": f"{sorteados} acertos", "ganhadores": 0, "valor": 0.0},
+        {"descricao": f"{sorteados - 1} acertos",
+         "ganhadores": rng.randrange(1, 90),
+         "valor": round(rng.uniform(8_000, 95_000), 2)},
+        {"descricao": f"{sorteados - 2} acertos",
+         "ganhadores": rng.randrange(150, 6_000),
+         "valor": round(rng.uniform(80, 1_400), 2)},
+    ]
     historico[-1]["proximo"] = {
         "data": (inicio + timedelta(days=(concursos + 1) * 3)).strftime("%d/%m/%Y"),
         "estimativa": float(rng.randrange(3, 120) * 1_000_000),
