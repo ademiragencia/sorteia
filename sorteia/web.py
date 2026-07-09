@@ -353,6 +353,26 @@ def _api_conferir(parametros: dict) -> dict:
     }
 
 
+def _api_fontes(parametros: dict) -> dict:
+    """Diagnóstico: o que cada fonte de dados responde agora para o jogo."""
+    jogo = obter_jogo(parametros.get("jogo", ["megasena"])[0])
+    resultado: dict = {"jogo": jogo.slug}
+    for nome, url in [
+        ("oficial", API_CAIXA.format(slug=jogo.slug)),
+        ("comunitaria_latest", API_COMUNITARIA.format(slug=jogo.slug) + "/latest"),
+    ]:
+        try:
+            registro = _normalizar(_get_json(url, timeout=15))
+            resultado[nome] = {
+                "concurso": registro["concurso"] if registro else None,
+                "data": registro.get("data") if registro else None,
+                "proximo": registro.get("proximo") if registro else None,
+            }
+        except Exception as erro:  # noqa: BLE001 - diagnóstico
+            resultado[nome] = {"erro": f"{type(erro).__name__}: {erro}"}
+    return resultado
+
+
 def app(environ, start_response):
     caminho = environ.get("PATH_INFO", "/") or "/"
     parametros = urllib.parse.parse_qs(environ.get("QUERY_STRING", ""))
@@ -371,6 +391,8 @@ def app(environ, start_response):
             return _json_resposta(start_response, _api_conferir(parametros))
         if caminho == "/api/status":
             return _json_resposta(start_response, _api_status(parametros))
+        if caminho == "/api/fontes":
+            return _json_resposta(start_response, _api_fontes(parametros))
         if caminho == "/manifest.webmanifest":
             return _resposta(start_response, MANIFESTO.encode("utf-8"),
                              "application/manifest+json; charset=utf-8",
